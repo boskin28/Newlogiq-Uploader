@@ -1,6 +1,6 @@
 langchain
 streamlit
-pinecone-client
+pinecone-client[grpc]
 PyPDF2
 openai
 tiktoken
