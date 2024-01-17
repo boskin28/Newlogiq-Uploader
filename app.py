@@ -3,7 +3,7 @@ import pinecone
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
-from langchain.vectorstores import Pinecone
+from langchain_community.vectorstores import Pinecone
 import hmac
 
 
