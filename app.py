@@ -58,7 +58,7 @@ PINECONE_API_ENV = "us-east4-gcp"
 index_name = st.secrets['INDEX_NAME']
 
 Pc = Pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
-index = Pc.Index(index_name')
+index = Pc.Index(index_name)
 
 # Initilize OpenAI
 OPENAI_API_KEY = st.secrets['OPENAI_API_KEY']
