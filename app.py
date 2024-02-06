@@ -1,10 +1,10 @@
 import streamlit as st
 from pinecone import Pinecone
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 from langchain_community.vectorstores import Pinecone as LcPc
-import hmac
+
 
 
 # Authentication:
@@ -52,16 +52,21 @@ if not check_password():
     st.stop()
 
 
-# Initialize Pinecone
+
+# Variables
+OPENAI_API_KEY = st.secrets['OPENAI_API_KEY']
 PINECONE_API_KEY = st.secrets['PINECONE_API_KEY']
 PINECONE_API_ENV = st.secrets['ENVIRONMENT']
 index_name = st.secrets['INDEX_NAME']
+index_host = st.secrets['HOST']
 
+
+# Initialize Pinecone
 # pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
 pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index(host=index_host)
 
 # Initilize OpenAI
-OPENAI_API_KEY = st.secrets['OPENAI_API_KEY']
 embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 
 
@@ -75,8 +80,7 @@ def get_pdf_text(pdf_docs):
 
 def get_text_chunks(text):
     text_splitter = RecursiveCharacterTextSplitter(
-        separators=['\n  \n','\n \n','\n'],
-        chunk_size=1000,
+        chunk_size=2000,
         chunk_overlap=200,
     )
     chunks = text_splitter.split_text(text)
@@ -114,3 +118,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
