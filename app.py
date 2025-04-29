@@ -3,10 +3,8 @@ from pinecone import Pinecone
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
-from langchain_community.vectorstores import Pinecone as LcPc
+from langchain_pinecone import PineconeVectorStore
 import hmac
-
-
 
 # Authentication:
 def check_password():
@@ -19,8 +17,6 @@ def check_password():
             st.text_input("Password", type="password", key="password")
             st.form_submit_button("Log in", on_click=password_entered)
 
-
-
     def password_entered():
         """Checks whether a password entered by the user is correct."""
         if st.session_state["username"] in st.secrets[
@@ -30,68 +26,68 @@ def check_password():
             st.secrets.passwords[st.session_state["username"]],
         ):
             st.session_state["password_correct"] = True
-            
-            # Don't store the username or password
             del st.session_state["password"]
             del st.session_state["username"]
         else:
             st.session_state["password_correct"] = False
 
-
-    # Return True if the username + password is validated.
     if st.session_state.get("password_correct", False):
         return True
 
-    # Show inputs for username + password.
     login_form()
     if "password_correct" in st.session_state:
         st.error("Username or password incorrect")
     return False
 
-# Do not continue until authenticated
 if not check_password():
     st.stop()
 
-
-
-# Variables
+# Secrets
 OPENAI_API_KEY = st.secrets['OPENAI_API_KEY']
 PINECONE_API_KEY = st.secrets['PINECONE_API_KEY']
 PINECONE_API_ENV = st.secrets['ENVIRONMENT']
 index_name = st.secrets['INDEX_NAME']
 index_host = st.secrets['HOST']
 
-
-# Initialize Pinecone
-# pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
+# Initialize Pinecone client
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(host=index_host)
 
-# Initilize OpenAI
+# Initialize OpenAI embeddings
 embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 
 
 def get_pdf_text(pdf_docs):
     text = ""
-    pdf_reader = PdfReader(pdf_docs)
-    for page in pdf_reader.pages:
-        text += page.extract_text()
+    reader = PdfReader(pdf_docs)
+    for page in reader.pages:
+        text += page.extract_text() or ""
     return text
 
 
 def get_text_chunks(text):
-    text_splitter = RecursiveCharacterTextSplitter(
+    splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
         chunk_overlap=200,
     )
-    chunks = text_splitter.split_text(text)
-    return chunks
+    return splitter.split_text(text)
 
 
 def get_vectorstore(text_chunks, pdf_name, namespace):
-    text = [f'{pdf_name}: {chunk}' for chunk in text_chunks]
-    meta = [{'filename' : pdf_name} for _ in range(len(text_chunks))]
-    vectorstore = LcPc.from_texts(text, embeddings, index_name=index_name, namespace=namespace, metadatas=meta)
+    # prepare inputs
+    texts = [f'{pdf_name}: {chunk}' for chunk in text_chunks]
+    metadatas = [{'filename': pdf_name} for _ in texts]
+
+    # create vector store using Pinecone-maintained LangChain adapter
+    vectorstore = PineconeVectorStore(
+        pinecone_api_key=PINECONE_API_KEY,
+        pinecone_environment=PINECONE_API_ENV,
+        index_name=index_name,
+        embedding=embeddings,
+        namespace=namespace,
+        texts=texts,
+        metadatas=metadatas,
+    )
     return vectorstore
 
 
@@ -100,25 +96,18 @@ def main():
     st.header("Upload Files :outbox_tray:")
 
     namespace = st.text_input("Enter the Vector Database Namespace", value="ME")
-    
-    # st.subheader("Your documents")
     pdf_docs = st.file_uploader(
-        "Upload your PDFs here and click on 'Process'", accept_multiple_files=True, type='pdf')
+        "Upload your PDFs here and click on 'Process'", accept_multiple_files=True, type='pdf'
+    )
 
     if st.button("Process"):
         with st.spinner("Processing"):
             for pdf in pdf_docs:
-                # get pdf text
                 raw_text = get_pdf_text(pdf)
-    
-                # get the text chunks
                 text_chunks = get_text_chunks(raw_text)
-    
-                # create vector store
                 vectorstore = get_vectorstore(text_chunks, pdf.name, namespace)
-
         st.write('Upload complete.')
-    
+
 
 if __name__ == '__main__':
     main()
