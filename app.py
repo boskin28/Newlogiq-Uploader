@@ -3,7 +3,7 @@ from pinecone import Pinecone
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
-from langchain_pinecone import PineconeVectorStore
+import uuid
 import hmac
 
 # Authentication
@@ -36,6 +36,7 @@ def check_password():
         st.error("Username or password incorrect")
     return False
 
+
 if not check_password():
     st.stop()
 
@@ -51,7 +52,6 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(host=index_host)
 embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 
-# Helpers
 
 def get_pdf_text(pdf):
     text = ""
@@ -67,18 +67,27 @@ def get_text_chunks(text):
 
 
 def get_vectorstore(text_chunks, pdf_name, namespace):
-    texts = [f"{pdf_name}: {chunk}" for chunk in text_chunks]
-    metadatas = [{"filename": pdf_name} for _ in texts]
+    """
+    Manually batch upserts so each HTTP request stays <4 MB.
+    """
+    batch_size = 200  # tune down if you still exceed limit
+    for i in range(0, len(text_chunks), batch_size):
+        batch = text_chunks[i : i + batch_size]
 
-    # final: use from_texts to avoid init-arg mismatch
-    vectorstore = PineconeVectorStore.from_texts(
-        texts=texts,
-        embedding=embeddings,
-        metadatas=metadatas,
-        index_name=index_name,
-        namespace=namespace,
-    )
-    return vectorstore
+        # prepare data
+        texts = [f"{pdf_name}: {c}" for c in batch]
+        metadatas = [{"filename": pdf_name} for _ in texts]
+        # obtain embeddings for this batch
+        embs = embeddings.embed_documents(texts)
+
+        # build Pinecone upsert tuples: (id, vector, metadata)
+        vectors = [
+            (str(uuid.uuid4()), emb, meta)
+            for emb, meta in zip(embs, metadatas)
+        ]
+
+        # upsert this batch
+        index.upsert(vectors=vectors, namespace=namespace)
 
 
 def main():
@@ -97,6 +106,7 @@ def main():
                 chunks = get_text_chunks(raw_text)
                 get_vectorstore(chunks, pdf.name, namespace)
         st.success('Upload complete.')
+
 
 if __name__ == '__main__':
     main()
