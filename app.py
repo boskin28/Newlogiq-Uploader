@@ -72,6 +72,49 @@ if clear:
 
 # Process PDFs and index
 if process and pdf_docs:
+    # sanitize index/namespace name
+    raw_ns = namespace or def_index
+    # enforce lowercase alphanumeric or hyphens
+    import re
+    idx = raw_ns.lower()
+    idx = re.sub(r"[^a-z0-9-]", "-", idx)
+    
+    # set OpenAI API key
+    os.environ["OPENAI_API_KEY"] = oai_key
+    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+
+    # ensure index exists
+    existing = pc.list_indexes().names()
+    if idx not in existing:
+        pc.create_index(
+            name=idx,
+            dimension=1536,
+            metric='euclidean',
+            spec=ServerlessSpec(cloud='aws', region=pc_env)
+        )
+    index = pc.Index(idx)
+
+    with st.spinner("Indexing documents in batches..."):
+        for pdf in pdf_docs:
+            # extract full text
+            text = "".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+            # chunk text
+            splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            chunks = splitter.split_text(text)
+            # embed chunks
+            vectors = embeddings.embed_documents(chunks)
+            # prepare entries with filename metadata
+            entries = [
+                (str(uuid.uuid4()), vec, {'text': chunk, 'document': pdf.name})
+                for chunk, vec in zip(chunks, vectors)
+            ]
+            # batch upsert
+            for batch in batch_iterable(entries, batch_size):
+                index.upsert(vectors=batch, namespace=idx)
+            # record chunk IDs per file
+            st.session_state['vector_ids'][pdf.name] = [vid for vid, _, _ in entries]
+    st.success("All documents indexed.")
+if process and pdf_docs:
     # set OpenAI API key
     os.environ["OPENAI_API_KEY"] = oai_key
     embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
