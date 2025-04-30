@@ -1,9 +1,17 @@
 import streamlit as st
+import pinecone
 from langchain.vectorstores import Pinecone
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 import uuid
+
+# Initialize Pinecone client
+# Assumes PINECONE_API_KEY and PINECONE_ENV are set in Streamlit secrets or environment variables
+pinecone.init(
+    api_key=st.secrets.get("PINECONE_API_KEY"),
+    environment=st.secrets.get("PINECONE_ENV")
+)
 
 # Authentication (unchanged)
 def check_password():
@@ -15,24 +23,24 @@ def check_password():
     def password_entered():
         # ...
         pass
-    if 'authenticated' not in st.session_state:
-        login_form()
-    elif not st.session_state['authenticated']:
+    if 'authenticated' not in st.session_state or not st.session_state['authenticated']:
         login_form()
 
 # Vector store helper
 def get_vectorstore(chunks, index_name, namespace):
     embeddings = OpenAIEmbeddings()
-    # batch-embed all chunks at once
+    # embed chunks in batch
     vectors = embeddings.embed_documents(chunks)
     all_ids = []
-    # upsert each chunk with its vector
+    # get Pinecone index instance
+    index = pinecone.Index(index_name)
+    # upsert each chunk with its vector and metadata
     for chunk, vector in zip(chunks, vectors):
-        id = str(uuid.uuid4())
-        Pinecone.upsert(index_name=index_name, namespace=namespace, vectors=[(id, vector, {'text': chunk})])
-        all_ids.append(id)
+        vid = str(uuid.uuid4())
+        index.upsert(vectors=[(vid, vector, {'text': chunk})], namespace=namespace)
+        all_ids.append(vid)
     st.session_state['vector_ids'][index_name] = all_ids
-    # return a Pinecone-based LangChain VectorStore for querying
+    # return a LangChain Pinecone vectorstore for querying
     return Pinecone.from_existing_index(
         embedding=embeddings,
         index_name=index_name,
