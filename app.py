@@ -20,31 +20,31 @@ def check_password():
     if 'authenticated' not in st.session_state or not st.session_state['authenticated']:
         login_form()
 
-# Initialize Pinecone SDK client
-api_key = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
-environment = st.secrets.get("PINECONE_ENV") or os.getenv("PINECONE_ENV")
-if not api_key or not environment:
-    st.error("Pinecone API key and environment must be set in Streamlit secrets or env variables.")
-    st.stop()
-pc = PineconeSDK(api_key=api_key, environment=environment)
-
-# PDF processing
-def get_pdf_text(pdf_file):
-    text = ""
-    reader = PdfReader(pdf_file)
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text
-
 # Main UI
 check_password()
 st.title("PDF Uploader & Vector Indexer")
 
-# Sidebar controls
-st.sidebar.header("Settings")
+# Sidebar: Pinecone credentials and settings
+st.sidebar.header("Pinecone Configuration")
+# Try secrets first, then env, then user input
+api_key = st.secrets.get("pinecone", {}).get("api_key") if isinstance(st.secrets.get("pinecone"), dict) else None
+api_key = api_key or os.getenv("PINECONE_API_KEY") or st.sidebar.text_input("Pinecone API Key", type="password")
+environment = st.secrets.get("pinecone", {}).get("environment") if isinstance(st.secrets.get("pinecone"), dict) else None
+environment = environment or os.getenv("PINECONE_ENV") or st.sidebar.text_input("Pinecone Environment")
+
+if not api_key or not environment:
+    st.sidebar.error("Pinecone API key and environment are required.")
+    st.stop()
+
+# Initialize Pinecone SDK client
+pc = PineconeSDK(api_key=api_key, environment=environment)
+
+# Sidebar chunk settings
+st.sidebar.header("Text Chunking")
 chunk_size = st.sidebar.slider("Chunk size", min_value=500, max_value=5000, value=1000, step=100)
 chunk_overlap = st.sidebar.slider("Chunk overlap", min_value=0, max_value=500, value=100, step=50)
 
+# PDF upload
 namespace = st.text_input("Namespace", value="default")
 pdf_docs = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
@@ -60,8 +60,8 @@ with col2:
 if clear:
     st.session_state['vector_ids'].clear()
 
+# Process PDFs and index
 if process and pdf_docs:
-    # Initialize embeddings
     embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
     # Ensure index exists
     index_name = namespace
@@ -76,13 +76,9 @@ if process and pdf_docs:
 
     with st.spinner("Indexing documents..."):
         for pdf in pdf_docs:
-            text = get_pdf_text(pdf)
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
-            )
+            text = "".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+            splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
             chunks = splitter.split_text(text)
-            # embed and upsert in batch
             vectors = embeddings.embed_documents(chunks)
             ids = []
             for chunk, vector in zip(chunks, vectors):
@@ -92,24 +88,19 @@ if process and pdf_docs:
             st.session_state['vector_ids'][pdf.name] = ids
     st.success("All documents indexed.")
 
-# Display indexed filenames and counts
+# Display indexed docs
 if st.session_state['vector_ids']:
     st.subheader("Indexed Documents")
     for fname, ids in st.session_state['vector_ids'].items():
         st.write(f"- {fname} ({len(ids)} chunks indexed)")
 
-# Example query section
-if st.session_state['vector_ids'] and st.button("Test Query"):
-    # show how to query using LangChain wrapper
-    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
-    vstore = LangChainPinecone.from_existing_index(
-        embedding=embeddings,
-        index_name=namespace,
-        namespace=namespace
-    )
+# Example similarity query
+if st.session_state['vector_ids']:
+    st.subheader("Test Similarity Search")
     query = st.text_input("Enter a query to test similarity search:")
     if query:
+        embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+        vstore = LangChainPinecone.from_existing_index(embedding=embeddings, index_name=namespace, namespace=namespace)
         results = vstore.similarity_search(query)
         for res in results:
             st.write(res.page_content)
-
