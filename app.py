@@ -29,25 +29,23 @@ try:
     openai_api_key = st.secrets["OPENAI_API_KEY"]
     pinecone_api_key = st.secrets["PINECONE_API_KEY"]
     pinecone_env = st.secrets["ENVIRONMENT"]
-    pinecone_host = st.secrets["HOST"]
     default_index = st.secrets.get("INDEX_NAME", "default")
 except KeyError as e:
     st.error(f"Missing required secret: {e.args[0]}")
     st.stop()
 
-# Initialize Pinecone SDK client
+# Initialize Pinecone SDK client (control-plane only)
 pc = PineconeSDK(
     api_key=pinecone_api_key,
-    environment=pinecone_env,
-    host=pinecone_host
+    environment=pinecone_env
 )
 
-# Sidebar chunk settings
+# Sidebar: chunking settings
 st.sidebar.header("Text Chunking Settings")
 chunk_size = st.sidebar.slider("Chunk size", min_value=500, max_value=5000, value=1000, step=100)
 chunk_overlap = st.sidebar.slider("Chunk overlap", min_value=0, max_value=500, value=100, step=50)
 
-# PDF upload and namespace/index selection
+# Upload and index configurations
 namespace = st.text_input("Namespace / Index Name", value=default_index)
 pdf_docs = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
@@ -65,19 +63,21 @@ if clear:
 
 # Process PDFs and index
 if process and pdf_docs:
-    # Set OpenAI key
+    # Set OpenAI API key for embeddings
     os.environ["OPENAI_API_KEY"] = openai_api_key
     embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
     # Ensure index exists
     index_name = namespace
-    if index_name not in [i.name for i in pc.list_indexes()]:
+    existing = [i.name for i in pc.list_indexes()]
+    if index_name not in existing:
         pc.create_index(
             name=index_name,
             dimension=1536,
             metric='euclidean',
             spec=ServerlessSpec(cloud='aws', region=pinecone_env)
         )
+    # Connect to index (will fetch data-plane host automatically)
     index = pc.Index(index_name)
 
     with st.spinner("Indexing documents..."):
@@ -94,7 +94,7 @@ if process and pdf_docs:
             st.session_state['vector_ids'][pdf.name] = ids
     st.success("All documents indexed.")
 
-# Display indexed docs
+# Display indexed documents
 if st.session_state['vector_ids']:
     st.subheader("Indexed Documents & Chunk Counts")
     for fname, ids in st.session_state['vector_ids'].items():
@@ -105,8 +105,9 @@ if st.session_state['vector_ids']:
     st.subheader("Test Similarity Search")
     query = st.text_input("Enter a query to test similarity search:")
     if query:
-        # Ensure OpenAI key is set
+        # ensure embedder is initialized
         os.environ["OPENAI_API_KEY"] = openai_api_key
+        embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
         vstore = LangChainPinecone.from_existing_index(
             embedding=embeddings,
             index_name=namespace,
