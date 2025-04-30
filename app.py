@@ -9,6 +9,7 @@ import uuid
 from itertools import islice
 
 # Authentication
+
 def check_password():
     def login_form():
         with st.form("Credentials"):
@@ -34,11 +35,15 @@ def batch_iterable(iterable, n):
 check_password()
 st.title("PDF Uploader & Vector Indexer")
 
-# Load Pinecone and OpenAI credentials from Streamlit secrets
-oai_key = st.secrets["OPENAI_API_KEY"]
-pc_api_key = st.secrets["PINECONE_API_KEY"]
-pc_env = st.secrets["ENVIRONMENT"]
-def_index = st.secrets.get("INDEX_NAME", "default")
+# Load credentials from secrets
+try:
+    oai_key = st.secrets["OPENAI_API_KEY"]
+    pc_api_key = st.secrets["PINECONE_API_KEY"]
+    pc_env = st.secrets["ENVIRONMENT"]
+    def_index = st.secrets.get("INDEX_NAME", "default")
+except KeyError as e:
+    st.error(f"Missing required secret: {e.args[0]}")
+    st.stop()
 
 # Initialize Pinecone SDK client
 pc = PineconeSDK(api_key=pc_api_key, environment=pc_env)
@@ -49,7 +54,7 @@ chunk_size = st.sidebar.slider("Chunk size", 500, 5000, 1000, 100)
 chunk_overlap = st.sidebar.slider("Chunk overlap", 0, 500, 100, 50)
 batch_size = st.sidebar.number_input("Upsert batch size", min_value=10, max_value=500, value=100, step=10)
 
-# Upload and index configurations
+# Upload and index controls
 namespace = st.text_input("Namespace / Index Name", value=def_index)
 pdf_docs = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
@@ -67,29 +72,41 @@ if clear:
 
 # Process PDFs and index
 if process and pdf_docs:
-    # set OpenAI key
+    # set OpenAI API key
     os.environ["OPENAI_API_KEY"] = oai_key
     embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
     # ensure index exists
-    idx_name = namespace
-    existing = [i.name for i in pc.list_indexes()]
-    if idx_name not in existing:
-        pc.create_index(name=idx_name, dimension=1536, metric='euclidean', spec=ServerlessSpec(cloud='aws', region=pc_env))
-    index = pc.Index(idx_name)
+    idx = namespace
+    existing = pc.list_indexes().names()
+    if idx not in existing:
+        pc.create_index(
+            name=idx,
+            dimension=1536,
+            metric='euclidean',
+            spec=ServerlessSpec(cloud='aws', region=pc_env)
+        )
+    index = pc.Index(idx)
 
     with st.spinner("Indexing documents in batches..."):
         for pdf in pdf_docs:
+            # extract full text
             text = "".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+            # chunk text
             splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
             chunks = splitter.split_text(text)
+            # embed chunks
             vectors = embeddings.embed_documents(chunks)
-            # prepare upsert entries
-            entries = [(str(uuid.uuid4()), vec, {'text': chunk}) for chunk, vec in zip(chunks, vectors)]
+            # prepare entries with filename metadata
+            entries = [
+                (str(uuid.uuid4()), vec, {'text': chunk, 'document': pdf.name})
+                for chunk, vec in zip(chunks, vectors)
+            ]
             # batch upsert
             for batch in batch_iterable(entries, batch_size):
                 index.upsert(vectors=batch, namespace=namespace)
-            st.session_state['vector_ids'][pdf.name] = [vid for vid,_,_ in entries]
+            # record chunk IDs per file
+            st.session_state['vector_ids'][pdf.name] = [vid for vid, _, _ in entries]
     st.success("All documents indexed.")
 
 # Display indexed documents
@@ -98,14 +115,21 @@ if st.session_state['vector_ids']:
     for fname, ids in st.session_state['vector_ids'].items():
         st.write(f"- {fname}: {len(ids)} chunks (batched upsert)")
 
-# Similarity search example
+# Similarity search example with document metadata
 if st.session_state['vector_ids']:
     st.subheader("Test Similarity Search")
     query = st.text_input("Enter a query to test similarity search:")
     if query:
         os.environ["OPENAI_API_KEY"] = oai_key
         embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
-        vstore = LangChainPinecone.from_existing_index(embedding=embeddings, index_name=namespace, namespace=namespace)
-        results = vstore.similarity_search(query)
-        for res in results:
-            st.write(res.page_content)
+        vstore = LangChainPinecone.from_existing_index(
+            embedding=embeddings,
+            index_name=namespace,
+            namespace=namespace
+        )
+        # include metadata in results
+        results = vstore.similarity_search_with_score(query)
+        for doc, score in results:
+            st.write(f"**Document:** {doc.metadata.get('document')}  ")
+            st.write(f"**Score:** {score}  ")
+            st.write(doc.page_content)
