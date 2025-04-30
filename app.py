@@ -4,7 +4,6 @@ from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 import uuid
-import hmac
 
 # Authentication (unchanged)
 def check_password():
@@ -24,11 +23,12 @@ def check_password():
 # Vector store helper
 def get_vectorstore(chunks, index_name, namespace):
     embeddings = OpenAIEmbeddings()
+    # batch-embed all chunks at once
+    vectors = embeddings.embed_documents(chunks)
     all_ids = []
-    for chunk in chunks:
+    # upsert each chunk with its vector
+    for chunk, vector in zip(chunks, vectors):
         id = str(uuid.uuid4())
-        vector = embeddings.embed(chunk)
-        # upsert vectors into Pinecone index
         Pinecone.upsert(index_name=index_name, namespace=namespace, vectors=[(id, vector, {'text': chunk})])
         all_ids.append(id)
     st.session_state['vector_ids'][index_name] = all_ids
