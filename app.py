@@ -1,12 +1,10 @@
-import os
 import streamlit as st
-from pinecone import Pinecone as PineconeSDK, ServerlessSpec
-from langchain.vectorstores import Pinecone as LangChainPinecone
+from pinecone import Pinecone
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 import uuid
-from itertools import islice
+import hmac
 
 # Authentication
 
@@ -16,163 +14,99 @@ def check_password():
             st.text_input("Username", key="username")
             st.text_input("Password", type="password", key="password")
             st.form_submit_button("Log in", on_click=password_entered)
+
     def password_entered():
-        # implement real auth logic here
-        st.session_state['authenticated'] = True
-    if 'authenticated' not in st.session_state or not st.session_state['authenticated']:
-        login_form()
+        if (
+            st.session_state["username"] in st.secrets["passwords"]
+            and hmac.compare_digest(
+                st.session_state["password"],
+                st.secrets.passwords[st.session_state["username"]],
+            )
+        ):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+            del st.session_state["username"]
+        else:
+            st.session_state["password_correct"] = False
 
-# Utility to batch an iterable into chunks of size n
-def batch_iterable(iterable, n):
-    it = iter(iterable)
-    while True:
-        batch = list(islice(it, n))
-        if not batch:
-            break
-        yield batch
+    if st.session_state.get("password_correct", False):
+        return True
+    login_form()
+    if "password_correct" in st.session_state:
+        st.error("Username or password incorrect")
+    return False
 
-# Main UI
-check_password()
-st.title("PDF Uploader & Vector Indexer")
 
-# Load credentials from secrets
-try:
-    oai_key = st.secrets["OPENAI_API_KEY"]
-    pc_api_key = st.secrets["PINECONE_API_KEY"]
-    pc_env = st.secrets["ENVIRONMENT"]
-    def_index = st.secrets.get("INDEX_NAME", "default")
-except KeyError as e:
-    st.error(f"Missing required secret: {e.args[0]}")
+if not check_password():
     st.stop()
 
-# Initialize Pinecone SDK client
-pc = PineconeSDK(api_key=pc_api_key, environment=pc_env)
+# Secrets
+OPENAI_API_KEY = st.secrets['OPENAI_API_KEY']
+PINECONE_API_KEY = st.secrets['PINECONE_API_KEY']
+PINECONE_API_ENV = st.secrets['ENVIRONMENT']
+index_name = st.secrets['INDEX_NAME']
+index_host = st.secrets['HOST']
 
-# Sidebar settings
-st.sidebar.header("Settings")
-chunk_size = st.sidebar.slider("Chunk size", 500, 5000, 1000, 100)
-chunk_overlap = st.sidebar.slider("Chunk overlap", 0, 500, 100, 50)
-batch_size = st.sidebar.number_input("Upsert batch size", min_value=10, max_value=500, value=100, step=10)
+# Initialize Pinecone client and embeddings
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index(host=index_host)
+embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 
-# Upload and index controls
-namespace = st.text_input("Namespace / Index Name", value=def_index)
-pdf_docs = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
-if 'vector_ids' not in st.session_state:
-    st.session_state['vector_ids'] = {}
+def get_pdf_text(pdf):
+    text = ""
+    reader = PdfReader(pdf)
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text
 
-col1, col2 = st.columns(2)
-with col1:
-    process = st.button("Process and Index")
-with col2:
-    clear = st.button("Clear History")
 
-if clear:
-    st.session_state['vector_ids'].clear()
+def get_text_chunks(text):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+    return splitter.split_text(text)
 
-# Process PDFs and index
-if process and pdf_docs:
-    # sanitize index/namespace name
-    raw_ns = namespace or def_index
-    # enforce lowercase alphanumeric or hyphens
-    import re
-    idx = raw_ns.lower()
-    idx = re.sub(r"[^a-z0-9-]", "-", idx)
-    
-    # set OpenAI API key
-    os.environ["OPENAI_API_KEY"] = oai_key
-    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
-    # ensure index exists
-    existing = pc.list_indexes().names()
-    if idx not in existing:
-        pc.create_index(
-            name=idx,
-            dimension=1536,
-            metric='euclidean',
-            spec=ServerlessSpec(cloud='aws', region=pc_env)
-        )
-    index = pc.Index(idx)
+def get_vectorstore(text_chunks, pdf_name, namespace):
+    """
+    Manually batch upserts so each HTTP request stays <4 MB.
+    """
+    batch_size = 200  # tune down if you still exceed limit
+    for i in range(0, len(text_chunks), batch_size):
+        batch = text_chunks[i : i + batch_size]
 
-    with st.spinner("Indexing documents in batches..."):
-        for pdf in pdf_docs:
-            # extract full text
-            text = "".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
-            # chunk text
-            splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-            chunks = splitter.split_text(text)
-            # embed chunks
-            vectors = embeddings.embed_documents(chunks)
-            # prepare entries with filename metadata
-            entries = [
-                (str(uuid.uuid4()), vec, {'text': chunk, 'document': pdf.name})
-                for chunk, vec in zip(chunks, vectors)
-            ]
-            # batch upsert
-            for batch in batch_iterable(entries, batch_size):
-                index.upsert(vectors=batch, namespace=idx)
-            # record chunk IDs per file
-            st.session_state['vector_ids'][pdf.name] = [vid for vid, _, _ in entries]
-    st.success("All documents indexed.")
-if process and pdf_docs:
-    # set OpenAI API key
-    os.environ["OPENAI_API_KEY"] = oai_key
-    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+        # prepare data
+        texts = [f"{pdf_name}: {c}" for c in batch]
+        metadatas = [{"filename": pdf_name} for _ in texts]
+        # obtain embeddings for this batch
+        embs = embeddings.embed_documents(texts)
 
-    # ensure index exists
-    idx = namespace
-    existing = pc.list_indexes().names()
-    if idx not in existing:
-        pc.create_index(
-            name=idx,
-            dimension=1536,
-            metric='euclidean',
-            spec=ServerlessSpec(cloud='aws', region=pc_env)
-        )
-    index = pc.Index(idx)
+        # build Pinecone upsert tuples: (id, vector, metadata)
+        vectors = [
+            (str(uuid.uuid4()), emb, meta)
+            for emb, meta in zip(embs, metadatas)
+        ]
 
-    with st.spinner("Indexing documents in batches..."):
-        for pdf in pdf_docs:
-            # extract full text
-            text = "".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
-            # chunk text
-            splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-            chunks = splitter.split_text(text)
-            # embed chunks
-            vectors = embeddings.embed_documents(chunks)
-            # prepare entries with filename metadata
-            entries = [
-                (str(uuid.uuid4()), vec, {'text': chunk, 'document': pdf.name})
-                for chunk, vec in zip(chunks, vectors)
-            ]
-            # batch upsert
-            for batch in batch_iterable(entries, batch_size):
-                index.upsert(vectors=batch, namespace=namespace)
-            # record chunk IDs per file
-            st.session_state['vector_ids'][pdf.name] = [vid for vid, _, _ in entries]
-    st.success("All documents indexed.")
+        # upsert this batch
+        index.upsert(vectors=vectors, namespace=namespace)
 
-# Display indexed documents
-if st.session_state['vector_ids']:
-    st.subheader("Indexed Documents & Chunk Counts")
-    for fname, ids in st.session_state['vector_ids'].items():
-        st.write(f"- {fname}: {len(ids)} chunks (batched upsert)")
 
-# Similarity search example with document metadata
-if st.session_state['vector_ids']:
-    st.subheader("Test Similarity Search")
-    query = st.text_input("Enter a query to test similarity search:")
-    if query:
-        os.environ["OPENAI_API_KEY"] = oai_key
-        embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
-        vstore = LangChainPinecone.from_existing_index(
-            embedding=embeddings,
-            index_name=namespace,
-            namespace=namespace
-        )
-        # include metadata in results
-        results = vstore.similarity_search_with_score(query)
-        for doc, score in results:
-            st.write(f"**Document:** {doc.metadata.get('document')}  ")
-            st.write(f"**Score:** {score}  ")
-            st.write(doc.page_content)
+def main():
+    st.set_page_config(page_title="Upload Files", page_icon=":outbox_tray:")
+    st.header("Upload Files :outbox_tray:")
+
+    namespace = st.text_input("Enter the Vector Database Namespace", value="ME")
+    pdf_docs = st.file_uploader(
+        "Upload your PDFs here and click on 'Process'", accept_multiple_files=True, type='pdf'
+    )
+
+    if st.button("Process"):
+        with st.spinner("Processing"):
+            for pdf in pdf_docs:
+                raw_text = get_pdf_text(pdf)
+                chunks = get_text_chunks(raw_text)
+                get_vectorstore(chunks, pdf.name, namespace)
+        st.success('Upload complete.')
+
+
+if __name__ == '__main__':
+    main()
